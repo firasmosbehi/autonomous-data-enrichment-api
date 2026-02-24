@@ -20,10 +20,27 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Autonomous Data Enrichment API",
-    description="Accepts messy, unstructured data and returns perfectly structured JSON.",
-    version="0.1.0",
+    title="Data Enrichment API",
+    description="""
+Transform messy, unstructured data into perfectly structured JSON using AI + live web search.
+
+## Features
+- **Company Enrichment** - Get domain, industry, HQ, employee count, LinkedIn from just a company name
+- **Address Parsing** - Parse and validate addresses into structured components
+- **Person Lookup** - Find professional info, title, company from a name
+
+## How It Works
+1. Send raw data (e.g., "Stripe payments")
+2. AI searches the web for accurate, up-to-date information
+3. Returns validated JSON with confidence score and sources
+
+## Pricing
+Available on RapidAPI with free tier (50 requests/month).
+""",
+    version="1.0.0",
     lifespan=lifespan,
+    contact={"name": "API Support", "url": "https://github.com/firasmosbehi/autonomous-data-enrichment-api"},
+    license_info={"name": "MIT"},
 )
 
 
@@ -101,23 +118,29 @@ async def health_check():
 @app.post("/api/v1/enrich", response_model=EnrichmentResponse)
 async def enrich_endpoint(
     request: EnrichmentRequest,
-    x_rapidapi_proxy_secret: str | None = Header(None),
+    x_rapidapi_proxy_secret: str | None = Header(None, alias="X-RapidAPI-Proxy-Secret"),
+    x_rapidapi_user: str | None = Header(None, alias="X-RapidAPI-User"),
+    x_rapidapi_subscription: str | None = Header(None, alias="X-RapidAPI-Subscription"),
 ):
     """
     Enrich raw, unstructured data and return structured JSON.
 
     Accepts messy data payloads (company names, addresses, etc.),
-    researches missing information, and returns validated structured data.
+    researches missing information using live web search,
+    and returns validated structured data.
 
-    Args:
-        request: The enrichment request with raw data.
-        x_rapidapi_proxy_secret: RapidAPI proxy secret for authentication.
+    **Supported data types:**
+    - `company` - Enrich company names to get domain, industry, HQ, etc.
+    - `address` - Parse and validate addresses
+    - `person` - Find professional info for individuals
 
-    Returns:
-        EnrichmentResponse: Structured, validated enrichment data.
-
-    Raises:
-        HTTPException: 401 for invalid credentials, 400 for bad input.
+    **Example request:**
+    ```json
+    {
+        "raw_data": "Stripe payments",
+        "data_type": "company"
+    }
+    ```
     """
     if not verify_rapidapi_secret(x_rapidapi_proxy_secret):
         raise HTTPException(
