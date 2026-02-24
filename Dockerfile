@@ -11,8 +11,8 @@ COPY pyproject.toml poetry.lock ./
 # Configure Poetry to not create a virtual environment
 RUN poetry config virtualenvs.create false
 
-# Install dependencies (production only)
-RUN poetry install --only main --no-interaction --no-ansi
+# Install dependencies only (not the project itself)
+RUN poetry install --only main --no-root --no-interaction --no-ansi
 
 # Copy application code
 COPY enrichment_api ./enrichment_api
