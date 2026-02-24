@@ -5,12 +5,25 @@ from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header, Request
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+from pydantic import BaseModel, EmailStr
 
 from .schemas import EnrichmentRequest, EnrichmentResponse
 from .llm import enrich_data
+from . import billing
 
 load_dotenv()
+
+
+class RegisterRequest(BaseModel):
+    """Request to register for a free API key."""
+    email: EmailStr
+
+
+class CheckoutRequest(BaseModel):
+    """Request to create a checkout session."""
+    email: EmailStr
+    plan: str
 
 
 @asynccontextmanager
@@ -30,12 +43,17 @@ Transform messy, unstructured data into perfectly structured JSON using AI + liv
 - **Person Lookup** - Find professional info, title, company from a name
 
 ## How It Works
-1. Send raw data (e.g., "Stripe payments")
-2. AI searches the web for accurate, up-to-date information
-3. Returns validated JSON with confidence score and sources
+1. Register for a free API key at `/api/v1/register`
+2. Send requests with `X-API-Key` header
+3. AI searches the web and returns validated JSON
 
 ## Pricing
-Available on RapidAPI with free tier (50 requests/month).
+| Plan | Requests/Month | Price |
+|------|---------------|-------|
+| Free | 50 | $0 |
+| Basic | 500 | $9.99/mo |
+| Pro | 2,000 | $29.99/mo |
+| Ultra | 10,000 | $99.99/mo |
 """,
     version="1.0.0",
     lifespan=lifespan,
@@ -72,38 +90,71 @@ async def home():
     <head>
         <title>Data Enrichment API</title>
         <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; background: #0d1117; color: #c9d1d9; }
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 900px; margin: 50px auto; padding: 20px; background: #0d1117; color: #c9d1d9; }
             h1 { color: #58a6ff; }
+            h2 { color: #8b949e; border-bottom: 1px solid #30363d; padding-bottom: 8px; }
             a { color: #58a6ff; }
-            .endpoint { background: #161b22; padding: 15px; border-radius: 8px; margin: 15px 0; border: 1px solid #30363d; }
-            code { background: #21262d; padding: 2px 6px; border-radius: 4px; }
+            .card { background: #161b22; padding: 20px; border-radius: 8px; margin: 15px 0; border: 1px solid #30363d; }
+            code { background: #21262d; padding: 2px 6px; border-radius: 4px; font-size: 14px; }
+            pre { background: #21262d; padding: 15px; border-radius: 8px; overflow-x: auto; }
             .method { color: #7ee787; font-weight: bold; }
+            .price { font-size: 24px; color: #58a6ff; }
+            .pricing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
+            .plan { text-align: center; }
+            .plan h3 { margin: 0; color: #f0f6fc; }
+            .plan .requests { color: #8b949e; font-size: 14px; }
+            .btn { display: inline-block; background: #238636; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; margin-top: 10px; }
+            .btn:hover { background: #2ea043; }
         </style>
     </head>
     <body>
-        <h1>Autonomous Data Enrichment API</h1>
-        <p>Transform messy, unstructured data into perfectly structured JSON.</p>
+        <h1>Data Enrichment API</h1>
+        <p>Transform messy, unstructured data into perfectly structured JSON using AI + live web search.</p>
 
-        <h2>Quick Links</h2>
-        <ul>
-            <li><a href="/docs">Swagger UI Documentation</a></li>
-            <li><a href="/redoc">ReDoc Documentation</a></li>
-        </ul>
-
-        <h2>Endpoints</h2>
-        <div class="endpoint">
-            <p><span class="method">POST</span> <code>/api/v1/enrich</code></p>
-            <p>Enrich raw data (company names, addresses, persons) and return structured JSON.</p>
+        <h2>Pricing</h2>
+        <div class="pricing-grid">
+            <div class="card plan">
+                <h3>Free</h3>
+                <p class="price">$0</p>
+                <p class="requests">50 requests/month</p>
+                <a href="/docs#/default/register_endpoint_api_v1_register_post" class="btn">Get Free Key</a>
+            </div>
+            <div class="card plan">
+                <h3>Basic</h3>
+                <p class="price">$9.99/mo</p>
+                <p class="requests">500 requests/month</p>
+            </div>
+            <div class="card plan">
+                <h3>Pro</h3>
+                <p class="price">$29.99/mo</p>
+                <p class="requests">2,000 requests/month</p>
+            </div>
+            <div class="card plan">
+                <h3>Ultra</h3>
+                <p class="price">$99.99/mo</p>
+                <p class="requests">10,000 requests/month</p>
+            </div>
         </div>
-        <div class="endpoint">
-            <p><span class="method">GET</span> <code>/health</code></p>
-            <p>Health check endpoint.</p>
-        </div>
 
-        <h2>Example</h2>
-        <pre><code>curl -X POST http://localhost:8000/api/v1/enrich \\
+        <h2>Quick Start</h2>
+        <div class="card">
+            <p><strong>1. Get your free API key:</strong></p>
+            <pre><code>curl -X POST https://enrichment-api-ttpv.onrender.com/api/v1/register \\
   -H "Content-Type: application/json" \\
-  -d '{"raw_data": "Apple Inc", "data_type": "company"}'</code></pre>
+  -d '{"email": "you@example.com"}'</code></pre>
+
+            <p><strong>2. Make enrichment requests:</strong></p>
+            <pre><code>curl -X POST https://enrichment-api-ttpv.onrender.com/api/v1/enrich \\
+  -H "X-API-Key: your_api_key" \\
+  -H "Content-Type: application/json" \\
+  -d '{"raw_data": "Stripe payments", "data_type": "company"}'</code></pre>
+        </div>
+
+        <h2>Documentation</h2>
+        <ul>
+            <li><a href="/docs">Swagger UI (Interactive)</a></li>
+            <li><a href="/redoc">ReDoc (Reference)</a></li>
+        </ul>
     </body>
     </html>
     """
@@ -115,37 +166,136 @@ async def health_check():
     return {"status": "healthy"}
 
 
+@app.post("/api/v1/register")
+async def register_endpoint(request: RegisterRequest):
+    """
+    Register for a free API key.
+
+    Provide your email to get an API key with 50 free requests/month.
+    """
+    result = billing.create_free_api_key(request.email)
+    return {
+        "api_key": result["api_key"],
+        "plan": result["plan"],
+        "requests_per_month": billing.PLANS[result["plan"]]["requests_per_month"],
+        "message": "Key already exists for this email" if result.get("already_exists") else "API key created successfully",
+    }
+
+
+@app.post("/api/v1/checkout")
+async def checkout_endpoint(request: CheckoutRequest):
+    """
+    Create a Stripe checkout session to upgrade your plan.
+
+    Available plans: basic ($9.99), pro ($29.99), ultra ($99.99)
+    """
+    if request.plan not in ["basic", "pro", "ultra"]:
+        raise HTTPException(status_code=400, detail="Invalid plan. Choose: basic, pro, or ultra")
+
+    try:
+        base_url = os.getenv("BASE_URL", "https://enrichment-api-ttpv.onrender.com")
+        checkout_url = billing.create_checkout_session(
+            email=request.email,
+            plan=request.plan,
+            success_url=f"{base_url}/checkout/success",
+            cancel_url=f"{base_url}/checkout/cancel",
+        )
+        return {"checkout_url": checkout_url}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to create checkout session")
+
+
+@app.get("/checkout/success", response_class=HTMLResponse)
+async def checkout_success():
+    """Success page after checkout."""
+    return """
+    <html><body style="font-family: sans-serif; text-align: center; padding: 50px;">
+    <h1>Payment Successful!</h1>
+    <p>Your API key has been upgraded. Check your email for details.</p>
+    <p><a href="/docs">Go to API Documentation</a></p>
+    </body></html>
+    """
+
+
+@app.get("/checkout/cancel", response_class=HTMLResponse)
+async def checkout_cancel():
+    """Cancel page for checkout."""
+    return """
+    <html><body style="font-family: sans-serif; text-align: center; padding: 50px;">
+    <h1>Checkout Cancelled</h1>
+    <p>Your payment was not processed.</p>
+    <p><a href="/">Go back home</a></p>
+    </body></html>
+    """
+
+
+@app.post("/api/v1/webhook")
+async def stripe_webhook(request: Request):
+    """
+    Stripe webhook endpoint for payment events.
+
+    Configure this URL in your Stripe dashboard.
+    """
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+
+    result = billing.handle_webhook(payload, sig_header)
+
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    return result
+
+
 @app.post("/api/v1/enrich", response_model=EnrichmentResponse)
 async def enrich_endpoint(
     request: EnrichmentRequest,
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
     x_rapidapi_proxy_secret: str | None = Header(None, alias="X-RapidAPI-Proxy-Secret"),
-    x_rapidapi_user: str | None = Header(None, alias="X-RapidAPI-User"),
-    x_rapidapi_subscription: str | None = Header(None, alias="X-RapidAPI-Subscription"),
 ):
     """
     Enrich raw, unstructured data and return structured JSON.
 
-    Accepts messy data payloads (company names, addresses, etc.),
-    researches missing information using live web search,
-    and returns validated structured data.
+    **Authentication:** Include your API key in the `X-API-Key` header.
+    Get a free key at `/api/v1/register`.
 
     **Supported data types:**
     - `company` - Enrich company names to get domain, industry, HQ, etc.
     - `address` - Parse and validate addresses
     - `person` - Find professional info for individuals
 
-    **Example request:**
-    ```json
-    {
-        "raw_data": "Stripe payments",
-        "data_type": "company"
-    }
+    **Example:**
+    ```bash
+    curl -X POST /api/v1/enrich \\
+      -H "X-API-Key: your_api_key" \\
+      -H "Content-Type: application/json" \\
+      -d '{"raw_data": "Stripe", "data_type": "company"}'
     ```
     """
-    if not verify_rapidapi_secret(x_rapidapi_proxy_secret):
+    # Check RapidAPI auth first (if configured)
+    if verify_rapidapi_secret(x_rapidapi_proxy_secret):
+        pass  # RapidAPI auth passed
+    elif x_api_key:
+        # Validate API key
+        validation = billing.validate_api_key(x_api_key)
+        if not validation:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        if not validation.get("valid"):
+            if validation.get("error") == "rate_limit_exceeded":
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Rate limit exceeded. Upgrade your plan at /api/v1/checkout. Current plan: {validation.get('plan')}",
+                )
+            raise HTTPException(status_code=401, detail="Invalid API key")
+
+        # Increment usage
+        billing.increment_usage(x_api_key)
+    else:
         raise HTTPException(
             status_code=401,
-            detail="Invalid or missing RapidAPI proxy secret",
+            detail="Missing authentication. Provide X-API-Key header. Get a free key at /api/v1/register",
         )
 
     try:
