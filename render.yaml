@@ -1,10 +1,12 @@
 services:
   - type: web
     name: enrichment-api
-    runtime: docker
+    runtime: python
     repo: https://github.com/firasmosbehi/autonomous-data-enrichment-api
     branch: main
     plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn enrichment_api.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
@@ -12,3 +14,5 @@ services:
         value: claude-sonnet-4-20250514
       - key: SERPER_API_KEY
         sync: false
+      - key: PYTHON_VERSION
+        value: "3.12.0"
