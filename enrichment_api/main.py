@@ -10,7 +10,11 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, EmailStr
 
 from .schemas import EnrichmentRequest, EnrichmentResponse, BatchEnrichmentRequest, BatchEnrichmentResponse
-from .llm import enrich_data
+from .llm import (
+    EnrichmentTimeoutError,
+    UpstreamServiceUnavailableError,
+    enrich_data,
+)
 from . import billing
 import asyncio
 
@@ -32,6 +36,7 @@ PRODUCTION_EXPECTED_ENV_VARS = (
     "BASE_URL",
     "REDIS_URL",
 )
+UPSTREAM_RETRY_AFTER_SECONDS = int(os.getenv("UPSTREAM_RETRY_AFTER_SECONDS", "15"))
 
 
 class RegisterRequest(BaseModel):
@@ -235,7 +240,10 @@ async def register_endpoint(request: RegisterRequest):
 
 
 @app.post("/api/v1/checkout")
-async def checkout_endpoint(request: CheckoutRequest):
+async def checkout_endpoint(
+    request: CheckoutRequest,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+):
     """
     Create a Stripe checkout session to upgrade your plan.
 
@@ -251,6 +259,7 @@ async def checkout_endpoint(request: CheckoutRequest):
             plan=request.plan,
             success_url=f"{base_url}/checkout/success",
             cancel_url=f"{base_url}/checkout/cancel",
+            idempotency_key=idempotency_key,
         )
         return {"checkout_url": checkout_url}
     except ValueError as e:
@@ -356,6 +365,16 @@ async def enrich_endpoint(
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except (UpstreamServiceUnavailableError, EnrichmentTimeoutError) as e:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "upstream_unavailable",
+                "message": str(e),
+                "retry_after_seconds": UPSTREAM_RETRY_AFTER_SECONDS,
+            },
+            headers={"Retry-After": str(UPSTREAM_RETRY_AFTER_SECONDS)},
+        )
 
 
 @app.post("/api/v1/enrich/batch", response_model=BatchEnrichmentResponse)
@@ -414,6 +433,18 @@ async def batch_enrich_endpoint(
     async def process_item(item: EnrichmentRequest) -> EnrichmentResponse:
         try:
             return await enrich_data(item)
+        except (UpstreamServiceUnavailableError, EnrichmentTimeoutError):
+            return EnrichmentResponse(
+                success=False,
+                data_type=item.data_type,
+                original_input=item.raw_data,
+                company=None,
+                address=None,
+                person=None,
+                domain_info=None,
+                confidence_score=0.0,
+                sources=[],
+            )
         except Exception:
             return EnrichmentResponse(
                 success=False,

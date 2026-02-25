@@ -15,6 +15,8 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
 _redis_client = None
 _memory_store = {}  # Fallback for local dev
+CHECKOUT_IDEMPOTENCY_TTL_SECONDS = int(os.getenv("CHECKOUT_IDEMPOTENCY_TTL_SECONDS", "86400"))
+WEBHOOK_EVENT_TTL_SECONDS = int(os.getenv("WEBHOOK_EVENT_TTL_SECONDS", "604800"))
 
 def _get_redis():
     """Get Redis client, initialize if needed."""
@@ -64,6 +66,63 @@ def _get_key_by_subscription(subscription_id: str) -> str | None:
         if data.get("stripe_subscription_id") == subscription_id:
             return key
     return None
+
+
+def _get_cached_checkout(idempotency_key: str) -> str | None:
+    """Get cached checkout URL for idempotent checkout requests."""
+    cache_key = f"idempotency:checkout:{idempotency_key}"
+    r = _get_redis()
+    if r:
+        return r.get(cache_key)
+
+    cached = _memory_store.get(cache_key)
+    if not cached:
+        return None
+    if datetime.utcnow() > datetime.fromisoformat(cached["expires_at"]):
+        del _memory_store[cache_key]
+        return None
+    return cached["checkout_url"]
+
+
+def _cache_checkout(idempotency_key: str, checkout_url: str) -> None:
+    """Cache checkout session URL for idempotent retries."""
+    cache_key = f"idempotency:checkout:{idempotency_key}"
+    r = _get_redis()
+    if r:
+        r.setex(cache_key, CHECKOUT_IDEMPOTENCY_TTL_SECONDS, checkout_url)
+        return
+    _memory_store[cache_key] = {
+        "checkout_url": checkout_url,
+        "expires_at": (datetime.utcnow() + timedelta(seconds=CHECKOUT_IDEMPOTENCY_TTL_SECONDS)).isoformat(),
+    }
+
+
+def _is_webhook_event_processed(event_id: str) -> bool:
+    """Check whether this Stripe webhook event has already been processed."""
+    cache_key = f"stripe:event:{event_id}"
+    r = _get_redis()
+    if r:
+        return bool(r.get(cache_key))
+
+    cached = _memory_store.get(cache_key)
+    if not cached:
+        return False
+    if datetime.utcnow() > datetime.fromisoformat(cached["expires_at"]):
+        del _memory_store[cache_key]
+        return False
+    return True
+
+
+def _mark_webhook_event_processed(event_id: str) -> None:
+    """Store Stripe webhook event id for idempotent processing."""
+    cache_key = f"stripe:event:{event_id}"
+    r = _get_redis()
+    if r:
+        r.setex(cache_key, WEBHOOK_EVENT_TTL_SECONDS, "1")
+        return
+    _memory_store[cache_key] = {
+        "expires_at": (datetime.utcnow() + timedelta(seconds=WEBHOOK_EVENT_TTL_SECONDS)).isoformat(),
+    }
 
 
 # Pricing plans
@@ -132,7 +191,13 @@ def increment_usage(api_key: str) -> None:
         _set_key_data(api_key, key_data)
 
 
-def create_checkout_session(email: str, plan: str, success_url: str, cancel_url: str) -> str:
+def create_checkout_session(
+    email: str,
+    plan: str,
+    success_url: str,
+    cancel_url: str,
+    idempotency_key: str | None = None,
+) -> str:
     """Create a Stripe checkout session for a plan upgrade."""
     if plan not in PLANS or plan == "free":
         raise ValueError(f"Invalid plan: {plan}")
@@ -140,6 +205,11 @@ def create_checkout_session(email: str, plan: str, success_url: str, cancel_url:
     price_id = PLANS[plan]["stripe_price_id"]
     if not price_id:
         raise ValueError(f"Stripe price not configured for plan: {plan}")
+
+    if idempotency_key:
+        cached_checkout = _get_cached_checkout(idempotency_key)
+        if cached_checkout:
+            return cached_checkout
 
     session = stripe.checkout.Session.create(
         payment_method_types=["card"],
@@ -149,7 +219,11 @@ def create_checkout_session(email: str, plan: str, success_url: str, cancel_url:
         cancel_url=cancel_url,
         customer_email=email,
         metadata={"plan": plan, "email": email},
+        idempotency_key=idempotency_key,
     )
+
+    if idempotency_key:
+        _cache_checkout(idempotency_key, session.url)
 
     return session.url
 
@@ -165,6 +239,10 @@ def handle_webhook(payload: bytes, sig_header: str) -> dict:
     except stripe.error.SignatureVerificationError:
         return {"error": "Invalid signature"}
 
+    event_id = event.get("id")
+    if event_id and _is_webhook_event_processed(event_id):
+        return {"status": "ignored", "event": event["type"], "reason": "duplicate_event"}
+
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
         email = session.get("customer_email") or session["metadata"].get("email")
@@ -175,13 +253,19 @@ def handle_webhook(payload: bytes, sig_header: str) -> dict:
         if email and plan:
             _upgrade_or_create_key(email, plan, customer_id, subscription_id)
 
+        if event_id:
+            _mark_webhook_event_processed(event_id)
         return {"status": "success", "event": "checkout.session.completed"}
 
     if event["type"] == "customer.subscription.deleted":
         subscription = event["data"]["object"]
         _downgrade_to_free(subscription["id"])
+        if event_id:
+            _mark_webhook_event_processed(event_id)
         return {"status": "success", "event": "customer.subscription.deleted"}
 
+    if event_id:
+        _mark_webhook_event_processed(event_id)
     return {"status": "ignored", "event": event["type"]}
 
 
