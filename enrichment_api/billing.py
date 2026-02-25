@@ -1,18 +1,70 @@
-"""Stripe billing and API key management."""
+"""Stripe billing and API key management with Redis persistence."""
 
 import os
 import secrets
 import json
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import stripe
+import redis
 
 # Initialize Stripe
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
-# Simple file-based storage for API keys (use Redis/DB in production)
-KEYS_FILE = Path("/tmp/api_keys.json")
+# Redis connection (falls back to in-memory dict if not configured)
+REDIS_URL = os.getenv("REDIS_URL")
+_redis_client = None
+_memory_store = {}  # Fallback for local dev
+
+def _get_redis():
+    """Get Redis client, initialize if needed."""
+    global _redis_client
+    if REDIS_URL and _redis_client is None:
+        _redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    return _redis_client
+
+
+def _get_key_data(api_key: str) -> dict | None:
+    """Get API key data from Redis or memory."""
+    r = _get_redis()
+    if r:
+        data = r.get(f"apikey:{api_key}")
+        return json.loads(data) if data else None
+    return _memory_store.get(api_key)
+
+
+def _set_key_data(api_key: str, data: dict) -> None:
+    """Save API key data to Redis or memory."""
+    r = _get_redis()
+    if r:
+        r.set(f"apikey:{api_key}", json.dumps(data, default=str))
+        # Also index by email for lookups
+        r.set(f"email:{data['email']}", api_key)
+    else:
+        _memory_store[api_key] = data
+
+
+def _get_key_by_email(email: str) -> str | None:
+    """Get API key by email."""
+    r = _get_redis()
+    if r:
+        return r.get(f"email:{email}")
+    for key, data in _memory_store.items():
+        if data.get("email") == email:
+            return key
+    return None
+
+
+def _get_key_by_subscription(subscription_id: str) -> str | None:
+    """Get API key by Stripe subscription ID."""
+    r = _get_redis()
+    if r:
+        return r.get(f"subscription:{subscription_id}")
+    for key, data in _memory_store.items():
+        if data.get("stripe_subscription_id") == subscription_id:
+            return key
+    return None
+
 
 # Pricing plans
 PLANS = {
@@ -23,18 +75,6 @@ PLANS = {
 }
 
 
-def _load_keys() -> dict:
-    """Load API keys from file."""
-    if KEYS_FILE.exists():
-        return json.loads(KEYS_FILE.read_text())
-    return {}
-
-
-def _save_keys(keys: dict) -> None:
-    """Save API keys to file."""
-    KEYS_FILE.write_text(json.dumps(keys, indent=2, default=str))
-
-
 def generate_api_key() -> str:
     """Generate a new API key."""
     return f"enrich_{secrets.token_urlsafe(32)}"
@@ -42,15 +82,14 @@ def generate_api_key() -> str:
 
 def create_free_api_key(email: str) -> dict:
     """Create a free tier API key."""
-    keys = _load_keys()
-
     # Check if email already has a key
-    for key_id, data in keys.items():
-        if data.get("email") == email:
-            return {"api_key": key_id, "plan": data["plan"], "already_exists": True}
+    existing_key = _get_key_by_email(email)
+    if existing_key:
+        data = _get_key_data(existing_key)
+        return {"api_key": existing_key, "plan": data["plan"], "already_exists": True}
 
     api_key = generate_api_key()
-    keys[api_key] = {
+    key_data = {
         "email": email,
         "plan": "free",
         "requests_used": 0,
@@ -60,26 +99,23 @@ def create_free_api_key(email: str) -> dict:
         "stripe_customer_id": None,
         "stripe_subscription_id": None,
     }
-    _save_keys(keys)
+    _set_key_data(api_key, key_data)
 
     return {"api_key": api_key, "plan": "free", "already_exists": False}
 
 
 def validate_api_key(api_key: str) -> dict | None:
     """Validate an API key and check rate limits."""
-    keys = _load_keys()
-
-    if api_key not in keys:
+    key_data = _get_key_data(api_key)
+    if not key_data:
         return None
-
-    key_data = keys[api_key]
 
     # Check if reset is needed
     resets_at = datetime.fromisoformat(key_data["resets_at"])
     if datetime.utcnow() > resets_at:
         key_data["requests_used"] = 0
         key_data["resets_at"] = (datetime.utcnow() + timedelta(days=30)).isoformat()
-        _save_keys(keys)
+        _set_key_data(api_key, key_data)
 
     # Check rate limit
     if key_data["requests_used"] >= key_data["requests_limit"]:
@@ -90,10 +126,10 @@ def validate_api_key(api_key: str) -> dict | None:
 
 def increment_usage(api_key: str) -> None:
     """Increment usage counter for an API key."""
-    keys = _load_keys()
-    if api_key in keys:
-        keys[api_key]["requests_used"] += 1
-        _save_keys(keys)
+    key_data = _get_key_data(api_key)
+    if key_data:
+        key_data["requests_used"] += 1
+        _set_key_data(api_key, key_data)
 
 
 def create_checkout_session(email: str, plan: str, success_url: str, cancel_url: str) -> str:
@@ -151,21 +187,31 @@ def handle_webhook(payload: bytes, sig_header: str) -> dict:
 
 def _upgrade_or_create_key(email: str, plan: str, customer_id: str, subscription_id: str) -> str:
     """Upgrade existing key or create new one for paid plan."""
-    keys = _load_keys()
+    r = _get_redis()
 
     # Find existing key by email
-    for key_id, data in keys.items():
-        if data.get("email") == email:
-            data["plan"] = plan
-            data["requests_limit"] = PLANS[plan]["requests_per_month"]
-            data["stripe_customer_id"] = customer_id
-            data["stripe_subscription_id"] = subscription_id
-            _save_keys(keys)
-            return key_id
+    existing_key = _get_key_by_email(email)
+    if existing_key:
+        key_data = _get_key_data(existing_key)
+        old_subscription = key_data.get("stripe_subscription_id")
+
+        key_data["plan"] = plan
+        key_data["requests_limit"] = PLANS[plan]["requests_per_month"]
+        key_data["stripe_customer_id"] = customer_id
+        key_data["stripe_subscription_id"] = subscription_id
+        _set_key_data(existing_key, key_data)
+
+        # Update subscription index
+        if r:
+            if old_subscription:
+                r.delete(f"subscription:{old_subscription}")
+            r.set(f"subscription:{subscription_id}", existing_key)
+
+        return existing_key
 
     # Create new key
     api_key = generate_api_key()
-    keys[api_key] = {
+    key_data = {
         "email": email,
         "plan": plan,
         "requests_used": 0,
@@ -175,18 +221,29 @@ def _upgrade_or_create_key(email: str, plan: str, customer_id: str, subscription
         "stripe_customer_id": customer_id,
         "stripe_subscription_id": subscription_id,
     }
-    _save_keys(keys)
+    _set_key_data(api_key, key_data)
+
+    # Index by subscription
+    if r:
+        r.set(f"subscription:{subscription_id}", api_key)
+
     return api_key
 
 
 def _downgrade_to_free(subscription_id: str) -> None:
     """Downgrade a subscription to free tier."""
-    keys = _load_keys()
+    api_key = _get_key_by_subscription(subscription_id)
+    if not api_key:
+        return
 
-    for key_id, data in keys.items():
-        if data.get("stripe_subscription_id") == subscription_id:
-            data["plan"] = "free"
-            data["requests_limit"] = PLANS["free"]["requests_per_month"]
-            data["stripe_subscription_id"] = None
-            _save_keys(keys)
-            return
+    key_data = _get_key_data(api_key)
+    if key_data:
+        key_data["plan"] = "free"
+        key_data["requests_limit"] = PLANS["free"]["requests_per_month"]
+        key_data["stripe_subscription_id"] = None
+        _set_key_data(api_key, key_data)
+
+        # Remove subscription index
+        r = _get_redis()
+        if r:
+            r.delete(f"subscription:{subscription_id}")
