@@ -1,5 +1,6 @@
 """FastAPI app with POST endpoint for data enrichment."""
 
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -14,6 +15,23 @@ from . import billing
 import asyncio
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+
+REQUIRED_RUNTIME_ENV_VARS = (
+    "ANTHROPIC_API_KEY",
+    "SERPER_API_KEY",
+)
+
+PRODUCTION_EXPECTED_ENV_VARS = (
+    "RAPIDAPI_PROXY_SECRET",
+    "STRIPE_SECRET_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+    "STRIPE_PRICE_BASIC",
+    "STRIPE_PRICE_PRO",
+    "STRIPE_PRICE_ULTRA",
+    "BASE_URL",
+    "REDIS_URL",
+)
 
 
 class RegisterRequest(BaseModel):
@@ -27,9 +45,40 @@ class CheckoutRequest(BaseModel):
     plan: str
 
 
+def _missing_env_vars(var_names: tuple[str, ...]) -> list[str]:
+    """Return env var names that are unset or empty."""
+    return [name for name in var_names if not os.getenv(name)]
+
+
+def validate_environment() -> dict[str, list[str]]:
+    """Validate startup environment and report missing variable names."""
+    return {
+        "missing_runtime": _missing_env_vars(REQUIRED_RUNTIME_ENV_VARS),
+        "missing_production": _missing_env_vars(PRODUCTION_EXPECTED_ENV_VARS),
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
+    report = validate_environment()
+    app_env = os.getenv("APP_ENV", "development").lower()
+
+    if report["missing_runtime"]:
+        message = (
+            "Missing required runtime environment variables: "
+            + ", ".join(report["missing_runtime"])
+        )
+        if app_env in {"production", "prod"}:
+            raise RuntimeError(message)
+        logger.warning(message)
+
+    if report["missing_production"]:
+        logger.warning(
+            "Missing production environment variables (feature-specific): %s",
+            ", ".join(report["missing_production"]),
+        )
+
     yield
 
 
