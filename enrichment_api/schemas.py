@@ -26,10 +26,27 @@ class EnrichmentRequest(BaseModel):
     @field_validator("data_type")
     @classmethod
     def validate_data_type(cls, v: str) -> str:
-        allowed = {"company", "address", "person"}
+        allowed = {"company", "address", "person", "domain"}
         if v.lower() not in allowed:
             raise ValueError(f"data_type must be one of: {allowed}")
         return v.lower()
+
+
+class BatchEnrichmentRequest(BaseModel):
+    """Input schema for batch enrichment requests."""
+
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True,
+        extra="forbid",
+    )
+
+    items: list[EnrichmentRequest] = Field(
+        ...,
+        description="List of items to enrich (max 10)",
+        min_length=1,
+        max_length=10,
+    )
 
 
 class CompanyInfo(BaseModel):
@@ -75,6 +92,22 @@ class PersonInfo(BaseModel):
     linkedin_url: str | None = Field(None, description="LinkedIn profile URL")
 
 
+class DomainInfo(BaseModel):
+    """Structured domain/website information."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    domain: str = Field(..., description="The domain name")
+    company_name: str | None = Field(None, description="Company that owns the domain")
+    industry: str | None = Field(None, description="Primary industry or sector")
+    description: str | None = Field(None, description="Brief description of the website/company")
+    headquarters: str | None = Field(None, description="Headquarters location")
+    founded_year: int | None = Field(None, description="Year founded")
+    employee_count: str | None = Field(None, description="Approximate employee count")
+    technologies: list[str] | None = Field(None, description="Technologies used by the website")
+    social_profiles: dict[str, str] | None = Field(None, description="Social media URLs")
+
+
 class EnrichmentResponse(BaseModel):
     """Output schema for enrichment responses."""
 
@@ -92,9 +125,24 @@ class EnrichmentResponse(BaseModel):
     person: PersonInfo | None = Field(
         None, description="Enriched person data if data_type is 'person'"
     )
+    domain_info: DomainInfo | None = Field(
+        None, description="Enriched domain data if data_type is 'domain'"
+    )
     confidence_score: float = Field(
         ..., ge=0.0, le=1.0, description="Confidence score of the enrichment (0-1)"
     )
     sources: list[str] = Field(
         default_factory=list, description="Sources used for enrichment"
     )
+
+
+class BatchEnrichmentResponse(BaseModel):
+    """Output schema for batch enrichment responses."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool = Field(..., description="Whether batch processing was successful")
+    total: int = Field(..., description="Total number of items processed")
+    successful: int = Field(..., description="Number of successfully enriched items")
+    failed: int = Field(..., description="Number of failed items")
+    results: list[EnrichmentResponse] = Field(..., description="List of enrichment results")

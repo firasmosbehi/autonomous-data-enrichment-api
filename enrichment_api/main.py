@@ -8,9 +8,10 @@ from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, EmailStr
 
-from .schemas import EnrichmentRequest, EnrichmentResponse
+from .schemas import EnrichmentRequest, EnrichmentResponse, BatchEnrichmentRequest, BatchEnrichmentResponse
 from .llm import enrich_data
 from . import billing
+import asyncio
 
 load_dotenv()
 
@@ -39,8 +40,10 @@ Transform messy, unstructured data into perfectly structured JSON using AI + liv
 
 ## Features
 - **Company Enrichment** - Get domain, industry, HQ, employee count, LinkedIn from just a company name
+- **Domain Enrichment** - Get company info from a website domain
 - **Address Parsing** - Parse and validate addresses into structured components
 - **Person Lookup** - Find professional info, title, company from a name
+- **Batch Processing** - Enrich up to 10 items in a single request
 
 ## How It Works
 1. Register for a free API key at `/api/v1/register`
@@ -263,6 +266,7 @@ async def enrich_endpoint(
 
     **Supported data types:**
     - `company` - Enrich company names to get domain, industry, HQ, etc.
+    - `domain` - Get company info from a website domain
     - `address` - Parse and validate addresses
     - `person` - Find professional info for individuals
 
@@ -303,3 +307,90 @@ async def enrich_endpoint(
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/v1/enrich/batch", response_model=BatchEnrichmentResponse)
+async def batch_enrich_endpoint(
+    request: BatchEnrichmentRequest,
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+    x_rapidapi_proxy_secret: str | None = Header(None, alias="X-RapidAPI-Proxy-Secret"),
+):
+    """
+    Enrich multiple items in a single request (max 10).
+
+    **Authentication:** Include your API key in the `X-API-Key` header.
+
+    **Note:** Each item counts as one request against your rate limit.
+
+    **Example:**
+    ```json
+    {
+        "items": [
+            {"raw_data": "Stripe", "data_type": "company"},
+            {"raw_data": "stripe.com", "data_type": "domain"},
+            {"raw_data": "Patrick Collison", "data_type": "person"}
+        ]
+    }
+    ```
+    """
+    # Check RapidAPI auth first (if configured)
+    if verify_rapidapi_secret(x_rapidapi_proxy_secret):
+        pass
+    elif x_api_key:
+        validation = billing.validate_api_key(x_api_key)
+        if not validation:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        if not validation.get("valid"):
+            if validation.get("error") == "rate_limit_exceeded":
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Rate limit exceeded. Upgrade your plan at /api/v1/checkout. Current plan: {validation.get('plan')}",
+                )
+            raise HTTPException(status_code=401, detail="Invalid API key")
+
+        # Check if user has enough requests remaining
+        remaining = validation.get("requests_remaining", 0)
+        if remaining < len(request.items):
+            raise HTTPException(
+                status_code=429,
+                detail=f"Not enough requests remaining. Need {len(request.items)}, have {remaining}. Upgrade at /api/v1/checkout",
+            )
+    else:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing authentication. Provide X-API-Key header. Get a free key at /api/v1/register",
+        )
+
+    # Process all items concurrently
+    async def process_item(item: EnrichmentRequest) -> EnrichmentResponse:
+        try:
+            return await enrich_data(item)
+        except Exception:
+            return EnrichmentResponse(
+                success=False,
+                data_type=item.data_type,
+                original_input=item.raw_data,
+                company=None,
+                address=None,
+                person=None,
+                domain_info=None,
+                confidence_score=0.0,
+                sources=[],
+            )
+
+    results = await asyncio.gather(*[process_item(item) for item in request.items])
+
+    # Increment usage for each item processed
+    if x_api_key:
+        for _ in request.items:
+            billing.increment_usage(x_api_key)
+
+    successful = sum(1 for r in results if r.success)
+
+    return BatchEnrichmentResponse(
+        success=True,
+        total=len(results),
+        successful=successful,
+        failed=len(results) - successful,
+        results=results,
+    )

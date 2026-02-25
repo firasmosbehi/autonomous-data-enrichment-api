@@ -39,6 +39,18 @@ async def _gather_search_context(request: EnrichmentRequest) -> str:
         )
         search_results.append(f"Address search results:\n{result}")
 
+    elif request.data_type == "domain":
+        # Search for domain/website information
+        domain = request.raw_data.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+
+        result = await enrichment_web_search(
+            WebSearchInput(query=f"site:{domain} OR {domain} company about", num_results=5)
+        )
+        search_results.append(f"Domain search results:\n{result}")
+
+        company_result = await enrichment_search_company(CompanySearchInput(query=domain))
+        search_results.append(f"Company info:\n{company_result}")
+
     return "\n\n".join(search_results)
 
 
@@ -92,6 +104,16 @@ IMPORTANT:
 - Professional title
 - Current company
 - LinkedIn URL if found""",
+        "domain": """Extract from search results for the domain_info field:
+- The domain name
+- Company name that owns this domain
+- Industry/sector
+- Brief description of the website/company
+- Headquarters location
+- Founded year
+- Employee count range
+- Technologies used (if mentioned)
+- Social media profiles (LinkedIn, Twitter, etc.)""",
     }
 
     user_message = f"""Please enrich the following {request.data_type} data using ONLY the search results provided.
